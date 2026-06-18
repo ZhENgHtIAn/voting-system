@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grpcserver-config
+data:
+  grpcserver.yaml: |
+    grpc:
+      listen_addr: ":50051"
+
+    redis:
+      addr: "redis-service:6379"
+      password: ""
+      db: 0
+      key: "voting:topics"
+
+    vote:
+      topics:
+        - "Golang"
+        - "Kubernetes"
+        - "Rust"
+
+    server:
+      request_timeout: "3s"
+
+    logging:
+      level: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grpcserver
+  labels:
+    app: grpcserver
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: grpcserver
+  template:
+    metadata:
+      labels:
+        app: grpcserver
+    spec:
+      containers:
+        - name: grpcserver
+          image: voting-system/grpcserver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-config"
+            - "/app/configs/grpcserver.yaml"
+          ports:
+            - containerPort: 50051
+              name: grpc
+          readinessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: grpcserver-config
+              mountPath: /app/configs/grpcserver.yaml
+              subPath: grpcserver.yaml
+      volumes:
+        - name: grpcserver-config
+          configMap:
+            name: grpcserver-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpcserver-headless
+  labels:
+    app: grpcserver
+spec:
+  clusterIP: None
+  selector:
+    app: grpcserver
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051

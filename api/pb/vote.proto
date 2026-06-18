@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package vote;
+
+option go_package = "example.com/voting-system/api/pb;pb";
+
+service VoteService {
+  rpc CastVote(VoteRequest) returns (VoteResponse);
+  rpc GetResults(Empty) returns (VoteResponse);
+}
+
+message Empty {}
+
+message VoteRequest {
+  string topic_name = 1;
+}
+
+message VoteResponse {
+  map<string, int64> results = 1;
+}

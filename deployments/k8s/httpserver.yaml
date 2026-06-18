@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: httpserver-config
+data:
+  httpserver.yaml: |
+    http:
+      listen_addr: ":8080"
+
+    grpc:
+      target: "dns:///grpcserver-headless:50051"
+
+    server:
+      request_timeout: "3s"
+
+    web:
+      dir: "/app/web"
+
+    logging:
+      level: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpserver
+  labels:
+    app: httpserver
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: httpserver
+  template:
+    metadata:
+      labels:
+        app: httpserver
+    spec:
+      containers:
+        - name: httpserver
+          image: voting-system/httpserver:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-config"
+            - "/app/configs/httpserver.yaml"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /api/results
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/results
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: httpserver-config
+              mountPath: /app/configs/httpserver.yaml
+              subPath: httpserver.yaml
+      volumes:
+        - name: httpserver-config
+          configMap:
+            name: httpserver-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: httpserver-nodeport
+  labels:
+    app: httpserver
+spec:
+  type: NodePort
+  selector:
+    app: httpserver
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080

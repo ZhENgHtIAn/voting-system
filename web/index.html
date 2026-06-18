@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>技术话题投票</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 16px;
+      }
+      h1 {
+        margin-bottom: 8px;
+      }
+      .hint {
+        color: #666;
+        margin-bottom: 24px;
+      }
+      .topics {
+        display: grid;
+        gap: 12px;
+      }
+      .topic-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 12px;
+      }
+      button {
+        border: none;
+        border-radius: 6px;
+        padding: 8px 14px;
+        background: #1976d2;
+        color: #fff;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #1565c0;
+      }
+      .error {
+        margin-top: 16px;
+        color: #c62828;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>在线技术话题投票</h1>
+    <div class="hint">点击按钮即可投票，页面会刷新最新结果。</div>
+    <div id="topics" class="topics"></div>
+    <div id="error" class="error"></div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

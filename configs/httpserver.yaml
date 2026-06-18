@@ -1,0 +1,14 @@
+http:
+  listen_addr: ":8080"
+
+grpc:
+  target: "dns:///localhost:50051"
+
+server:
+  request_timeout: "3s"
+
+web:
+  dir: "web"
+
+logging:
+  level: "info"
