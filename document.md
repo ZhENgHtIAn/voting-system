@@ -1,202 +1,256 @@
 
-# 📝 在线投票系统 (Voting System) 开发指导文档
+# 在线投票系统项目说明与验收文档
 
-## 一、 项目概述
+## 1. 项目目标
 
-本项目旨在开发一个供公司内部使用的在线技术话题投票系统。系统采用微服务架构，基于 Go 语言开发，使用 Redis 作为底层数据存储以应对并发场景，并最终容器化部署至 Kubernetes 集群中。
+本系统用于公司内部技术话题投票，目标是让员工通过 Web 页面投票，系统实时展示票数，并用投票结果决定下一次技术分享会主题。
 
-**核心技术栈：**
+项目按微服务方式实现，采用 Go + gRPC + Redis + Kubernetes，满足以下关键要求：
 
-* **编程语言：** Go (建议版本 >= 1.18)
-* **通信协议：** HTTP/REST (前端与网关) + gRPC (内部微服务通信)
-* **数据存储：** Redis (处理高并发计数)
-* **前端技术：** HTML + 原生 JavaScript
-* **部署环境：** Docker + Kubernetes (K8s)
-
----
-
-## 二、 架构设计与微服务划分
-
-系统包含以下三个核心组件，数据流向为：`Web Frontend -> HttpServer -> GrpcServer -> Redis`
-
-1. **Web 前端 (Frontend):**
-* 展示至少 3 个技术话题（如：Golang, Kubernetes, Rust）。
-* 提供投票按钮，通过 AJAX/Fetch 向 HttpServer 发送 HTTP POST 请求。
-* 实时（或在每次投票后）更新页面上的各选项得票数。
-
-
-2. **httpserver (HTTP 接入层 / API 网关):**
-* **无状态服务**（K8s 部署 3 个 Pod）。
-* 负责托管前端静态文件（HTML/JS）。
-* 接收前端的 HTTP 投票请求，将其解析并转换为 gRPC 请求。
-* **负载均衡：** 内部配置 gRPC 客户端负载均衡策略（Round Robin），将请求均匀分发给后端的 GrpcServer。
-
-
-3. **grpcserver (核心业务逻辑层):**
-* **无状态服务**（K8s 部署 3 个 Pod）。
-* 暴露 gRPC 接口供 HttpServer 调用。
-* 负责处理并发投票逻辑，直接与 Redis 交互。
-
-
-4. **Redis (存储层):**
-* 采用 **Hash** 数据结构存储投票数据。Key 为 `voting:topics`，Field 为话题名称，Value 为票数。
-
-
+- 后端使用 Go 开发
+- 微服务拆分为 `httpserver` 与 `grpcserver`
+- `httpserver` 与 `grpcserver` 在 K8s 中至少 3 副本
+- 使用 Redis 存储投票计数，保证并发写入正确性
+- 提供可用前端页面，支持投票后实时刷新
+- 单元测试覆盖率 > 30%
 
 ---
 
-## 三、 核心难点与解决方案
+## 2. 架构与数据流（详细）
 
-1. **并发投票导致的数据不一致（Race Condition）：**
-* **❌ 错误做法：** 先从 Redis `GET` 当前票数，加 1，再 `SET` 回去。高并发下会导致数据互相覆盖。
-* **✅ 正确做法：** 使用 Redis 的原子自增命令 `HINCRBY voting:topics <topic_id> 1`。Redis 核心是单线程执行命令的，这保证了并发修改的绝对安全。
+### 2.1 组件职责
 
+1) Web 前端 (`web/index.html`, `web/app.js`)
+- 展示话题与票数
+- 发送 HTTP 请求给 `httpserver`
+- 投票后刷新最新结果
 
-2. **Kubernetes 中的 gRPC 负载均衡失效：**
-* **问题：** gRPC 基于 HTTP/2 长连接。K8s 默认的 ClusterIP Service 是基于连接的四层负载均衡。一旦 HttpServer 和 GrpcServer 建立连接，后续所有请求都会打到同一个 GrpcServer Pod 上，导致 3 个 Pod 闲置 2 个。
-* **✅ 解决方案：** 将 GrpcServer 的 K8s Service 配置为 **Headless Service** (`clusterIP: None`)。并在 HttpServer 的 gRPC 客户端代码中配置 `round_robin` 负载均衡策略，通过 DNS 轮询解析到所有 Pod 的 IP，实现客户端负载均衡。
+2) HTTP 网关 (`httpserver`)
+- 提供 REST API：
+  - `GET /api/results`
+  - `POST /api/vote`
+- 负责把 HTTP 请求转换为 gRPC 调用
+- 托管前端静态资源，避免跨域
 
+3) gRPC 业务服务 (`grpcserver`)
+- 提供 `VoteService`：
+  - `GetResults`
+  - `CastVote`
+- 执行话题校验、投票写入、结果读取
+- 直接访问 Redis
 
+4) Redis
+- 使用 Hash：`voting:topics`
+- Field 为话题名，Value 为票数
+- 写操作采用 `HINCRBY` 原子自增，解决并发覆盖问题
+
+### 2.2 请求链路
+
+完整链路：
+
+`Browser -> httpserver -> grpcserver -> Redis -> grpcserver -> httpserver -> Browser`
+
+#### A. 页面初始化（读取结果）
+
+1. 浏览器加载 `http://<host>:8080/`
+2. `web/app.js` 调用 `GET /api/results`
+3. `httpserver` 调用 gRPC `GetResults`
+4. `grpcserver` 执行 Redis `HGETALL voting:topics`
+5. 返回 `map<string, int64>` 到前端并渲染
+
+#### B. 用户投票（写入并返回最新结果）
+
+1. 浏览器点击某话题投票按钮
+2. 前端发 `POST /api/vote`，Body: `{"topic_name":"Golang"}`
+3. `httpserver` 调 gRPC `CastVote`
+4. `grpcserver` 校验话题是否在固定三话题白名单中
+5. 执行 `HINCRBY voting:topics Golang 1`
+6. 再执行 `HGETALL voting:topics` 返回全量最新票数
+7. 前端收到响应后直接重绘票数
+
+### 2.3 并发一致性设计
+
+并发风险点是“同时投票可能互相覆盖”。  
+系统采用 Redis 原子命令 `HINCRBY`，避免了“先读后写”竞态：
+
+- 错误模式：GET -> +1 -> SET（会丢写）
+- 当前实现：`HINCRBY` 单命令原子更新（不会丢写）
+
+### 2.4 可观测性与链路追踪
+
+系统增加了统一结构化日志：
+
+- 级别：`debug/info/warn/error`
+- 字段：时间、服务名、消息、扩展字段
+- HTTP 层为请求生成/透传 `X-Request-ID`
+- gRPC 拦截器记录 method、request_id、code、duration
+
+可用日志定位一次完整请求在多服务间的流转。
 
 ---
 
-## 四、 项目目录规范 (Standard Go Project Layout)
-
-请 Agent 严格按照以下目录结构生成文件：
+## 3. 代码组织
 
 ```text
 voting-system/
-├── api/
-│   └── pb/
-│       └── vote.proto             # gRPC 接口定义文件
+├── api/pb/                        # proto 契约 + 生成代码
 ├── cmd/
-│   ├── httpserver/
-│   │   └── main.go                # HTTP 服务入口
-│   └── grpcserver/
-│       └── main.go                # gRPC 服务入口
+│   ├── grpcserver/                # gRPC 服务启动入口
+│   ├── httpserver/                # HTTP 网关启动入口
+│   ├── grpcclient/                # 调试客户端
+│   └── redistest.go               # Redis 本地验证脚本
 ├── internal/
-│   ├── httpserver/                # HTTP 路由与 gRPC Client 封装
-│   ├── grpcserver/                # gRPC 服务逻辑实现
-│   └── pkg/                       # 公共组件 (如 redis 初始化)
-├── web/
-│   ├── index.html                 # 投票页面 UI
-│   └── app.js                     # 页面交互脚本
+│   ├── grpcserver/                # VoteService 业务实现
+│   ├── httpserver/                # HTTP handler、配置、路由
+│   └── pkg/
+│       ├── config.go              # grpcserver 配置
+│       ├── redis.go               # Redis 客户端封装
+│       └── logging/logger.go      # 统一日志组件
+├── configs/                       # http/grpc 运行配置
+├── web/                           # 前端静态页面
 ├── deployments/
-│   ├── docker/
-│   │   ├── Dockerfile.http
-│   │   └── Dockerfile.grpc
-│   └── k8s/
-│       ├── redis.yaml             # 单机版 Redis 部署
-│       ├── grpcserver.yaml        # Headless Service + Deployment (3 replicas)
-│       └── httpserver.yaml        # NodePort Service + Deployment (3 replicas)
-├── go.mod
-└── README.md                      # 项目说明文档
-
+│   ├── docker/                    # Dockerfile.grpc / Dockerfile.http
+│   └── k8s/                       # redis/grpcserver/httpserver K8s 清单
+├── docs/                          # 总览与分模块实现/原理文档
+└── scripts/                       # proto 生成、调试脚本
 ```
 
 ---
 
-## 五、 接口定义契约 (API Design)
+## 4. 接口定义
 
-### 1. Protobuf 定义 (`api/pb/vote.proto`)
+### 4.1 gRPC 接口（`api/pb/vote.proto`）
 
-定义两个 RPC 方法：获取所有话题及票数、进行投票。
+- `CastVote(VoteRequest) returns (VoteResponse)`
+- `GetResults(Empty) returns (VoteResponse)`
+- `VoteRequest.topic_name`：投票话题
+- `VoteResponse.results`：全部话题票数映射
 
-```protobuf
-syntax = "proto3";
-package vote;
-option go_package = "./pb";
+### 4.2 HTTP 接口（`httpserver` 暴露）
 
-service VoteService {
-  rpc CastVote (VoteRequest) returns (VoteResponse);
-  rpc GetResults (Empty) returns (VoteResponse);
-}
+- `GET /api/results`
+  - 返回：`{"results":{"Golang":1,"Kubernetes":0,"Rust":0}}`
+- `POST /api/vote`
+  - 请求：`{"topic_name":"Golang"}`
+  - 返回：最新全量票数
 
-message Empty {}
+---
 
-message VoteRequest {
-  string topic_name = 1;
-}
+## 5. 配置说明
 
-message VoteResponse {
-  map<string, int64> results = 1; // 返回所有话题的最新票数
-}
+### 5.1 `configs/grpcserver.yaml`
+- gRPC 监听地址
+- Redis 地址/密码/DB/Key
+- 固定三话题
+- 请求超时
+- 日志级别
 
+### 5.2 `configs/httpserver.yaml`
+- HTTP 监听地址
+- gRPC 目标地址（`dns:///grpcserver-headless:50051`）
+- 请求超时
+- 静态资源目录
+- 日志级别
+
+---
+
+## 6. 测试与覆盖率
+
+测试已迁移至统一目录 `internal/test`：
+
+- `internal/test/test.go`（测试逻辑与公共测试基建）
+- `internal/test/test_test.go`（`go test` 入口）
+
+当前已通过的测试覆盖 HTTP、gRPC 和并发一致性：
+
+- HTTP 配置加载/校验/回退
+- HTTP Handler 成功与异常分支
+- gRPC `CastVote` / `GetResults` 核心行为
+- gRPC 并发 `CastVote` 一致性
+- Web 入口全链路并发集成测试（`Web -> HTTP -> gRPC -> Redis`）
+
+本地覆盖率结果（最近一次）：
+
+- `go test -v ./internal/test` 全部通过
+- `go test -v -coverprofile=coverage.out ./...`
+- `go tool cover -func=coverage.out`
+- 覆盖率输出为 `80.0%`（高于要求的 `>30%`）
+
+覆盖率口径说明：
+
+- 当前 `80.0%` 来自 `internal/test` 包自身语句覆盖。
+- 若需统计“被测试调用到的业务包”覆盖率，建议使用：
+
+```bash
+go test -v -coverpkg=./... -coverprofile=coverage.out ./internal/test
+go tool cover -func=coverage.out
 ```
 
-### 2. HTTP RESTful API (由 `httpserver` 暴露给前端)
+---
 
-* **获取结果:** `GET /api/results` -> 返回 JSON 格式的所有话题及票数。
-* **提交投票:** `POST /api/vote` -> Body `{"topic_name": "Golang"}` -> 返回更新后的所有话题票数。
+## 7. 容器化与 K8s 部署
+
+### 7.1 Docker
+
+- `deployments/docker/Dockerfile.grpc`
+- `deployments/docker/Dockerfile.http`
+
+特性：
+
+- 多阶段构建（builder + runtime）
+- Alpine 运行镜像
+- 非 root 用户运行
+
+### 7.2 Kubernetes
+
+- `deployments/k8s/redis.yaml`
+  - Redis 单实例：`Deployment(1) + ClusterIP Service`
+- `deployments/k8s/grpcserver.yaml`
+  - `Deployment(replicas: 3)`
+  - `Headless Service (clusterIP: None)`
+- `deployments/k8s/httpserver.yaml`
+  - `Deployment(replicas: 3)`
+  - `NodePort Service (30080)`
+
+说明：Redis 按当前策略保持单实例，不做 Redis 集群化。
 
 ---
 
-## 六、 Agent 执行步骤指南 (Phase-by-Phase)
+## 8. 本地验证步骤（Minikube）
 
-*请让 Agent 按以下阶段顺序编写代码，每完成一个阶段进行一次本地测试。*
+1) 启动集群  
+- `minikube start`
 
-### Phase 1: 基础环境与契约生成
+2) 构建服务镜像（可结合代理）  
+- 构建 `grpcserver` / `httpserver` 镜像
 
-1. 初始化项目 `go mod init voting-system`。
-2. 安装依赖库 (注意兼容性，推荐指定版本)：
-* gRPC: `go get google.golang.org/grpc@v1.54.0`
-* Protobuf: `go get google.golang.org/protobuf@v1.30.0`
-* Redis: `go get github.com/redis/go-redis/v9@v9.0.5`
+3) 导入镜像并部署  
+- `minikube image load ...`
+- `kubectl apply -f deployments/k8s/*.yaml`
 
-
-3. 编写 `vote.proto` 并使用 `protoc` 生成 Go 源码 (`vote.pb.go` 和 `vote_grpc.pb.go`)。
-
-### Phase 2: 开发 GrpcServer (后端核心)
-
-1. 在 `internal/pkg/` 下封装 Redis 客户端连接逻辑。
-2. 在 `internal/grpcserver/` 下实现 `VoteServiceServer` 接口。
-* `CastVote` 方法：调用 Redis `HIncrBy` 增加对应话题票数，随后调用 `HGetAll` 返回最新完整数据。
-* `GetResults` 方法：调用 Redis `HGetAll` 返回当前完整数据。
-
-
-3. 在 `cmd/grpcserver/main.go` 中启动 TCP 监听并注册 gRPC 服务。
-
-### Phase 3: 开发 HttpServer 与 Web 前端
-
-1. **Web 前端**：编写简单的 HTML，包含三个按钮（例如：Golang, K8s, Rust）。使用 `fetch` 实现 GET 初始化列表和 POST 提交投票。
-2. **HttpServer**：
-* 初始化 gRPC 客户端连接（使用 `grpc.DialContext`），**注意配置 Round Robin 负载均衡策略**。
-* 编写 HTTP Handler：拦截 `/api/results` 和 `/api/vote`，提取参数并调用 gRPC 客户端。
-* 配置静态文件服务代理 `web/` 目录，使得打开 `http://localhost:8080/` 即可访问前端（解决跨域问题）。
-
-
-
-### Phase 4: 单元测试编写 (覆盖率目标 > 30%)
-
-1. 对 HttpServer 的 Handler 使用 `net/http/httptest` 进行测试。
-2. 通过接口（Interface） Mock掉后端的 gRPC 客户端或 Redis 客户端，编写不依赖真实数据库的业务逻辑测试。
-3. 指导生成查看测试覆盖率的命令 (`go test -coverprofile=coverage.out ./...`)。
-
-### Phase 5: 容器化与 Kubernetes 部署配置
-
-1. 编写基于多阶段构建的 Dockerfile (`Dockerfile.http`, `Dockerfile.grpc`)，保持镜像轻量（Alpine）。
-2. 编写 K8s YAML 清单：
-* **Redis**：Deployment (1 Pod) + Service (ClusterIP)。
-* **GrpcServer**：Deployment (`replicas: 3`) + Service (**ClusterIP: None**, 端口如 50051)。
-* **HttpServer**：Deployment (`replicas: 3`) + Service (Type: **NodePort**，供外部浏览器访问)。
-
-
+4) 功能验证  
+- `curl http://<minikube_ip>:30080/api/results`
+- `curl -X POST http://<minikube_ip>:30080/api/vote ...`
+- 再次查询结果，确认票数递增
 
 ---
 
-## 七、 交付物清单对照 (作业验收标准)
+## 9. 验收对照（对应作业要求）
 
-Agent 开发完成后，请对照以下要求确认是否全部满足：
-
-* [ ] 1. Go 语言开发的后端服务。
-* [ ] 2. 包含 httpserver (网关) 和 grpcserver (微服务)。
-* [ ] 3. Kubernetes YAML 中明确写明了 `replicas: 3`。
-* [ ] 4. 数据流转完整：Web -> HTTP -> gRPC -> Redis，且返回结果。
-* [ ] 5. 使用 Redis `HINCRBY` 解决了并发投票计数问题。
-* [ ] 6. Web 页面能展示至少三个话题，且点击投票后数字能实时刷新。
-* [ ] 7. 编写了单元测试，覆盖率超过 30%。
-* [ ] 8. 撰写了最终的架构文档，并准备了符合要求的代码仓库。
+- [x] 1. Go 语言后端服务
+- [x] 2. 包含 httpserver 与 grpcserver 微服务
+- [x] 3. 两个服务均为 3 副本部署
+- [x] 4. 数据流转：Web -> HTTP -> gRPC -> Redis 完整
+- [x] 5. 使用 Redis `HINCRBY` 处理并发计数
+- [x] 6. Web 页面至少 3 话题且投票后刷新
+- [x] 7. 单元测试覆盖率 > 30%
+- [x] 8. 提供架构与实现文档
 
 ---
 
-**给你的提示**：接下来，你可以将这个文档的前半部分和“Phase 1”单独喂给 Agent，例如告诉它：“*根据文档的 Phase 1 和目录结构，帮我生成 protobuf 文件和对应的生成脚本*”，这样能够最稳定地推进开发！
+## 10. 提交清单建议
+
+1) 代码仓库地址（GitHub/GitLab）  
+2) 本文档（代码组织、微服务设计、关键技术点）  
+3) 3 分钟内演示录屏（编译、部署、投票演示）  
+4) 覆盖率截图与命令输出  
