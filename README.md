@@ -111,7 +111,7 @@ voting-system/
 │   ├── docker/                    # Dockerfile.grpc / Dockerfile.http
 │   └── k8s/                       # redis/grpcserver/httpserver K8s 清单
 ├── docs/                          # 总览与分模块实现/原理文档
-└── scripts/                       # proto 生成、调试脚本
+└── scripts/                       # proto 生成、调试与演示脚本
 ```
 
 ---
@@ -212,6 +212,98 @@ go tool cover -func=coverage.out
 - 并发请求 `POST /api/vote`（HTTP）  
 - 链路经过 `HTTP -> gRPC -> Redis`  
 - 最终 `GET /api/results` 结果与总请求数完全一致
+
+### 6.5 并发投票在测试中如何实现
+
+并发投票通过 Go 协程并行发请求实现，核心步骤如下：
+
+1) 创建并发任务  
+- 使用 `sync.WaitGroup` 计数，循环启动多个 goroutine（例如 120/240/300）。
+
+2) 每个任务执行一次投票写入  
+- HTTP 测试：每个 goroutine 发一次 `POST /api/vote`。  
+- gRPC 测试：每个 goroutine 调一次 `CastVote`。
+
+3) 等待所有任务结束  
+- 调用 `wg.Wait()`，保证所有并发写入已经完成。
+
+4) 读取最终结果并断言不变量  
+- 调用 `GET /api/results` 或 `GetResults`。  
+- 断言“最终票数 == 并发请求总数”，验证无丢票、无覆盖写。
+
+### 6.6 非 K8s 本地演示脚本
+
+项目提供 `scripts/demo_local.sh`，用于不依赖 K8s 的本地演示流程（适合录屏）：
+
+```bash
+bash scripts/demo_local.sh up
+bash scripts/demo_local.sh status
+bash scripts/demo_local.sh verify
+bash scripts/demo_local.sh logs
+bash scripts/demo_local.sh down
+```
+
+脚本能力：
+- 自动启动（或复用）本地 Redis
+- 编译并启动 `grpcserver` / `httpserver`
+- 通过 `http://127.0.0.1:8080/` 打开前端页面
+- 输出本地日志文件路径，便于演示讲解
+
+### 6.7 K8s 演示脚本
+
+项目提供 `scripts/demo_k8s.sh`，用于演示“构建镜像 -> 部署 K8s -> Web 验证 -> 日志观察”：
+
+```bash
+bash scripts/demo_k8s.sh up
+bash scripts/demo_k8s.sh up-nobuild
+bash scripts/demo_k8s.sh forward
+bash scripts/demo_k8s.sh stop-forward
+bash scripts/demo_k8s.sh status
+bash scripts/demo_k8s.sh url
+bash scripts/demo_k8s.sh verify
+bash scripts/demo_k8s.sh logs http
+bash scripts/demo_k8s.sh logs grpc
+bash scripts/demo_k8s.sh logs redis
+bash scripts/demo_k8s.sh reset-votes
+bash scripts/demo_k8s.sh down
+```
+
+说明：
+- `up`：`build + load + deploy`
+- `up-nobuild`：跳过构建，直接 `load + deploy`（适合镜像已构建完成的二次演示）
+- 脚本会自动启动端口转发，推荐通过 `http://127.0.0.1:18080/` 访问前端
+- 若转发中断，可手动执行 `bash scripts/demo_k8s.sh forward`
+
+命令描述（与脚本 help 一致）：
+- `build`：构建 `grpcserver/httpserver` Docker 镜像
+- `load`：导出并加载镜像到 Minikube
+- `deploy`：应用 K8s YAML 并等待服务就绪
+- `up`：执行 `build + load + deploy`
+- `up-nobuild`：跳过构建，直接 `load + deploy`
+- `forward`：启动本地端口转发（`127.0.0.1:18080 -> svc/httpserver-nodeport:8080`）
+- `stop-forward`：停止本地端口转发
+- `verify`：执行接口验证（`GET -> POST -> GET`）
+- `url`：输出 Web 访问地址
+- `logs`：查看服务日志（`http/grpc/redis`）
+- `status`：查看 Deployment/Pod/Service 状态
+- `reset-votes`：清空 Redis 投票数据
+- `down`：删除 K8s 资源
+
+### 6.8 单元测试与覆盖率演示脚本
+
+项目提供 `scripts/demo_test.sh`：
+
+```bash
+bash scripts/demo_test.sh run
+```
+
+等价分步骤命令：
+
+```bash
+bash scripts/demo_test.sh unit
+bash scripts/demo_test.sh cover
+bash scripts/demo_test.sh report
+```
 
 ---
 
@@ -337,6 +429,33 @@ curl -s -X POST http://$MINIKUBE_IP:30080/api/vote \
 curl -s http://$MINIKUBE_IP:30080/api/results
 ```
 
+### 9.6 集群启动后 Web 联调验证（推荐）
+
+先确认服务全部就绪：
+
+```bash
+kubectl rollout status deploy/redis
+kubectl rollout status deploy/grpcserver
+kubectl rollout status deploy/httpserver
+kubectl get pods -o wide
+```
+
+访问 Web：
+
+```bash
+MINIKUBE_IP=$(minikube ip)
+echo "Web URL: http://$MINIKUBE_IP:30080/"
+```
+
+打开浏览器进入上面 URL，连续点击不同话题投票按钮。  
+同时在终端执行：
+
+```bash
+curl -s http://$MINIKUBE_IP:30080/api/results
+```
+
+若页面显示和接口返回票数持续递增，说明 Web 前端与集群后端联调正常。
+
 ---
 
 ## 10. 多 Pod 日志查看方法
@@ -364,6 +483,40 @@ kubectl logs -f <pod-name>
 kubectl logs -f <pod-name> --previous
 ```
 
+### 10.4 推荐日志观察方式（3 个终端）
+
+终端 A（HTTP 网关）：
+
+```bash
+kubectl logs -f deploy/httpserver --tail=200
+```
+
+终端 B（gRPC 服务）：
+
+```bash
+kubectl logs -f deploy/grpcserver --tail=200
+```
+
+终端 C（Redis）：
+
+```bash
+kubectl logs -f deploy/redis --tail=200
+```
+
+然后在浏览器页面投票，或执行：
+
+```bash
+MINIKUBE_IP=$(minikube ip)
+curl -s -X POST http://$MINIKUBE_IP:30080/api/vote \
+  -H "Content-Type: application/json" \
+  -d '{"topic_name":"Rust"}'
+```
+
+即可观察三层服务日志联动：
+- `httpserver`：接收请求、转发 gRPC、响应状态
+- `grpcserver`：话题校验、投票写入、结果读取
+- `redis`：连接与命令执行日志（镜像默认日志较少）
+
 ---
 
 ## 11. 验收对照（对应作业要求）
@@ -378,10 +531,3 @@ kubectl logs -f <pod-name> --previous
 - [x] 8. 提供架构与实现文档
 
 ---
-
-## 12. 提交清单建议
-
-1) 代码仓库地址（GitHub/GitLab）  
-2) 本文档（代码组织、微服务设计、关键技术点）  
-3) 3 分钟内演示录屏（编译、部署、投票演示）  
-4) 覆盖率截图与命令输出  

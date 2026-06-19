@@ -18,3 +18,4 @@ coverage.out
 # 本地运行产生的临时文件
 *.log
 tmp/
+.demo/

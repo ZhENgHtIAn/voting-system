@@ -112,7 +112,7 @@ voting-system/
 │   ├── docker/                    # Dockerfile.grpc / Dockerfile.http
 │   └── k8s/                       # redis/grpcserver/httpserver K8s 清单
 ├── docs/                          # 总览与分模块实现/原理文档
-└── scripts/                       # proto 生成、调试脚本
+└── scripts/                       # proto 生成、调试与演示脚本
 ```
 
 ---
@@ -186,6 +186,13 @@ go test -v -coverpkg=./... -coverprofile=coverage.out ./internal/test
 go tool cover -func=coverage.out
 ```
 
+并发投票在测试中的实现方式：
+
+1) 使用 `sync.WaitGroup` 启动多 goroutine 并行发起投票请求。  
+2) HTTP 路径通过 `POST /api/vote` 并发写入，gRPC 路径通过并发 `CastVote` 写入。  
+3) 等待所有并发请求结束后，再读取最终票数。  
+4) 断言“最终票数 == 并发请求总数”，验证并发一致性。
+
 ---
 
 ## 7. 容器化与 K8s 部署
@@ -216,26 +223,165 @@ go tool cover -func=coverage.out
 
 ---
 
-## 8. 本地验证步骤（Minikube）
+## 8. 非 K8s 本地演示脚本
 
-1) 启动集群  
-- `minikube start`
+项目提供 `scripts/demo_local.sh` 用于本地演示（不经过 K8s）：
 
-2) 构建服务镜像（可结合代理）  
-- 构建 `grpcserver` / `httpserver` 镜像
+```bash
+bash scripts/demo_local.sh up
+bash scripts/demo_local.sh status
+bash scripts/demo_local.sh verify
+bash scripts/demo_local.sh logs
+bash scripts/demo_local.sh down
+```
 
-3) 导入镜像并部署  
-- `minikube image load ...`
-- `kubectl apply -f deployments/k8s/*.yaml`
-
-4) 功能验证  
-- `curl http://<minikube_ip>:30080/api/results`
-- `curl -X POST http://<minikube_ip>:30080/api/vote ...`
-- 再次查询结果，确认票数递增
+说明：
+- `up` 会启动/复用本地 Redis，编译并启动 `grpcserver` 与 `httpserver`
+- Web 访问地址为 `http://127.0.0.1:8080/`
+- 日志默认写入 `.demo/local/logs/`
 
 ---
 
-## 9. 验收对照（对应作业要求）
+## 9. K8s 演示脚本
+
+项目提供 `scripts/demo_k8s.sh`，支持以下演示动作：
+
+```bash
+bash scripts/demo_k8s.sh up
+bash scripts/demo_k8s.sh up-nobuild
+bash scripts/demo_k8s.sh forward
+bash scripts/demo_k8s.sh stop-forward
+bash scripts/demo_k8s.sh status
+bash scripts/demo_k8s.sh url
+bash scripts/demo_k8s.sh verify
+bash scripts/demo_k8s.sh logs http
+bash scripts/demo_k8s.sh logs grpc
+bash scripts/demo_k8s.sh logs redis
+bash scripts/demo_k8s.sh reset-votes
+bash scripts/demo_k8s.sh down
+```
+
+说明：
+- `up`：`build + load + deploy`
+- `up-nobuild`：跳过构建，直接 `load + deploy`，用于镜像已准备好的场景
+- 脚本会自动启动端口转发，建议通过 `http://127.0.0.1:18080/` 访问前端
+
+命令描述（与脚本 help 一致）：
+- `build`：构建 `grpcserver/httpserver` Docker 镜像
+- `load`：导出并加载镜像到 Minikube
+- `deploy`：应用 K8s YAML 并等待服务就绪
+- `up`：执行 `build + load + deploy`
+- `up-nobuild`：跳过构建，直接 `load + deploy`
+- `forward`：启动本地端口转发（`127.0.0.1:18080 -> svc/httpserver-nodeport:8080`）
+- `stop-forward`：停止本地端口转发
+- `verify`：执行接口验证（`GET -> POST -> GET`）
+- `url`：输出 Web 访问地址
+- `logs`：查看服务日志（`http/grpc/redis`）
+- `status`：查看 Deployment/Pod/Service 状态
+- `reset-votes`：清空 Redis 投票数据
+- `down`：删除 K8s 资源
+
+适用场景：
+- 录制 K8s 部署与功能演示视频
+- 快速复现完整部署流程
+- 分别观察 `httpserver` / `grpcserver` / `redis` 服务日志
+
+---
+
+## 10. 单元测试与覆盖率演示脚本
+
+项目提供 `scripts/demo_test.sh`：
+
+```bash
+bash scripts/demo_test.sh run
+```
+
+分步骤模式：
+
+```bash
+bash scripts/demo_test.sh unit
+bash scripts/demo_test.sh cover
+bash scripts/demo_test.sh report
+```
+
+---
+
+## 11. 本地验证步骤（Minikube）
+
+### 11.1 启动集群
+
+```bash
+minikube start
+kubectl config current-context
+kubectl get nodes
+```
+
+### 11.2 构建并导入镜像
+
+```bash
+docker build -f deployments/docker/Dockerfile.grpc -t voting-system/grpcserver:latest .
+docker build -f deployments/docker/Dockerfile.http -t voting-system/httpserver:latest .
+
+docker save -o /tmp/voting-grpcserver.tar voting-system/grpcserver:latest
+docker save -o /tmp/voting-httpserver.tar voting-system/httpserver:latest
+
+minikube image load /tmp/voting-grpcserver.tar
+minikube image load /tmp/voting-httpserver.tar
+```
+
+### 11.3 部署服务并确认就绪
+
+```bash
+kubectl apply -f deployments/k8s/redis.yaml
+kubectl apply -f deployments/k8s/grpcserver.yaml
+kubectl apply -f deployments/k8s/httpserver.yaml
+
+kubectl rollout status deploy/redis
+kubectl rollout status deploy/grpcserver
+kubectl rollout status deploy/httpserver
+kubectl get pods -o wide
+kubectl get svc
+```
+
+### 11.4 启动 Web 并验证功能
+
+Web 前端由 `httpserver` 直接托管，不需要单独启动前端进程。
+
+```bash
+MINIKUBE_IP=$(minikube ip)
+echo "Web URL: http://$MINIKUBE_IP:30080/"
+
+curl -s http://$MINIKUBE_IP:30080/api/results
+curl -s -X POST http://$MINIKUBE_IP:30080/api/vote \
+  -H "Content-Type: application/json" \
+  -d '{"topic_name":"Golang"}'
+curl -s http://$MINIKUBE_IP:30080/api/results
+```
+
+浏览器打开 `http://$MINIKUBE_IP:30080/`，点击页面投票按钮，观察票数与接口返回同步增长。
+
+### 11.5 查看每个服务日志
+
+推荐开 3 个终端分别跟踪：
+
+```bash
+kubectl logs -f deploy/httpserver --tail=200
+kubectl logs -f deploy/grpcserver --tail=200
+kubectl logs -f deploy/redis --tail=200
+```
+
+可配合发请求触发日志：
+
+```bash
+MINIKUBE_IP=$(minikube ip)
+curl -s -X POST http://$MINIKUBE_IP:30080/api/vote \
+  -H "Content-Type: application/json" \
+  -d '{"topic_name":"Rust"}'
+```
+
+---
+
+## 12. 验收对照（对应作业要求）
 
 - [x] 1. Go 语言后端服务
 - [x] 2. 包含 httpserver 与 grpcserver 微服务
@@ -248,7 +394,7 @@ go tool cover -func=coverage.out
 
 ---
 
-## 10. 提交清单建议
+## 13. 提交清单建议
 
 1) 代码仓库地址（GitHub/GitLab）  
 2) 本文档（代码组织、微服务设计、关键技术点）  
