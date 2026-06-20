@@ -1,4 +1,4 @@
-# 在线投票系统项目说明与验收文档
+# 在线投票系统项目说明
 
 ## 1. 项目目标
 
@@ -15,7 +15,7 @@
 
 ---
 
-## 2. 架构与数据流（详细）
+## 2. 架构与数据流
 
 ### 2.1 组件职责
 
@@ -155,10 +155,7 @@ voting-system/
 
 ## 6. 测试与覆盖率
 
-### 6.1 什么是单元测试覆盖率
-
-单元测试覆盖率表示“测试执行时，代码语句被运行到的比例”。  
-常见表达是 statements coverage（语句覆盖率）：
+### 6.1 单元测试覆盖率
 
 `覆盖率 = 被测试执行过的语句数 / 总语句数 * 100%`
 
@@ -191,15 +188,6 @@ go tool cover -func=coverage.out
 - `go tool cover -func=coverage.out`
 - 覆盖率输出为 `80.0%`（高于要求的 `>30%`）
 
-### 6.3 覆盖率口径说明
-
-当前 `go test -coverprofile=coverage.out ./...` 的 `80.0%`，来自 `internal/test` 包自身语句覆盖。  
-若要统计“被测试调用到的业务包”的覆盖率，建议使用：
-
-```bash
-go test -v -coverpkg=./... -coverprofile=coverage.out ./internal/test
-go tool cover -func=coverage.out
-```
 
 ### 6.4 并发一致性结论
 
@@ -233,7 +221,7 @@ go tool cover -func=coverage.out
 
 ### 6.6 非 K8s 本地演示脚本
 
-项目提供 `scripts/demo_local.sh`，用于不依赖 K8s 的本地演示流程（适合录屏）：
+项目提供 `scripts/demo_local.sh`，用于不依赖 K8s 的本地演示流程：
 
 ```bash
 bash scripts/demo_local.sh up
@@ -354,180 +342,15 @@ kubectl exec -it deploy/redis -- redis-cli DEL voting:topics
 
 ---
 
-## 9. 本地验证步骤（Minikube，完整可执行）
+## 9. 验收对照（对应作业要求）
 
-### 9.1 启动 Minikube
-
-```bash
-minikube start
-kubectl config current-context
-kubectl get nodes
-```
-
-### 9.2 构建服务镜像（本机 Docker）
-
-如需代理，先在当前 shell 设置代理变量（示例端口 7897）：
-
-```bash
-export http_proxy=http://127.0.0.1:7897
-export https_proxy=http://127.0.0.1:7897
-export HTTP_PROXY=http://127.0.0.1:7897
-export HTTPS_PROXY=http://127.0.0.1:7897
-```
-
-构建镜像：
-
-```bash
-docker build --network=host \
-  --build-arg http_proxy=$http_proxy \
-  --build-arg https_proxy=$https_proxy \
-  -f deployments/docker/Dockerfile.grpc \
-  -t voting-system/grpcserver:latest .
-
-docker build --network=host \
-  --build-arg http_proxy=$http_proxy \
-  --build-arg https_proxy=$https_proxy \
-  -f deployments/docker/Dockerfile.http \
-  -t voting-system/httpserver:latest .
-```
-
-### 9.3 导入镜像到 Minikube
-
-```bash
-docker save -o /tmp/voting-grpcserver.tar voting-system/grpcserver:latest
-docker save -o /tmp/voting-httpserver.tar voting-system/httpserver:latest
-
-minikube image load /tmp/voting-grpcserver.tar
-minikube image load /tmp/voting-httpserver.tar
-```
-
-### 9.4 部署 K8s 资源
-
-```bash
-kubectl apply -f deployments/k8s/redis.yaml
-kubectl apply -f deployments/k8s/grpcserver.yaml
-kubectl apply -f deployments/k8s/httpserver.yaml
-
-kubectl get deploy
-kubectl get pods
-kubectl get svc
-```
-
-### 9.5 访问 Web 与接口验证
-
-Web 页面由 `httpserver` 托管，不需要额外单独启动前端服务。  
-获取访问地址并验证：
-
-```bash
-MINIKUBE_IP=$(minikube ip)
-echo "Open in browser: http://$MINIKUBE_IP:30080/"
-
-curl -s http://$MINIKUBE_IP:30080/api/results
-curl -s -X POST http://$MINIKUBE_IP:30080/api/vote \
-  -H "Content-Type: application/json" \
-  -d '{"topic_name":"Golang"}'
-curl -s http://$MINIKUBE_IP:30080/api/results
-```
-
-### 9.6 集群启动后 Web 联调验证（推荐）
-
-先确认服务全部就绪：
-
-```bash
-kubectl rollout status deploy/redis
-kubectl rollout status deploy/grpcserver
-kubectl rollout status deploy/httpserver
-kubectl get pods -o wide
-```
-
-访问 Web：
-
-```bash
-MINIKUBE_IP=$(minikube ip)
-echo "Web URL: http://$MINIKUBE_IP:30080/"
-```
-
-打开浏览器进入上面 URL，连续点击不同话题投票按钮。  
-同时在终端执行：
-
-```bash
-curl -s http://$MINIKUBE_IP:30080/api/results
-```
-
-若页面显示和接口返回票数持续递增，说明 Web 前端与集群后端联调正常。
-
----
-
-## 10. 多 Pod 日志查看方法
-
-### 10.1 查看某个 Deployment 的所有 Pod 名称
-
-```bash
-kubectl get pods -l app=httpserver
-kubectl get pods -l app=grpcserver
-kubectl get pods -l app=redis
-```
-
-### 10.2 查看 Deployment 聚合日志
-
-```bash
-kubectl logs deploy/httpserver --tail=200
-kubectl logs deploy/grpcserver --tail=200
-kubectl logs deploy/redis --tail=200
-```
-
-### 10.3 指定某个 Pod 实时跟踪日志
-
-```bash
-kubectl logs -f <pod-name>
-kubectl logs -f <pod-name> --previous
-```
-
-### 10.4 推荐日志观察方式（3 个终端）
-
-终端 A（HTTP 网关）：
-
-```bash
-kubectl logs -f deploy/httpserver --tail=200
-```
-
-终端 B（gRPC 服务）：
-
-```bash
-kubectl logs -f deploy/grpcserver --tail=200
-```
-
-终端 C（Redis）：
-
-```bash
-kubectl logs -f deploy/redis --tail=200
-```
-
-然后在浏览器页面投票，或执行：
-
-```bash
-MINIKUBE_IP=$(minikube ip)
-curl -s -X POST http://$MINIKUBE_IP:30080/api/vote \
-  -H "Content-Type: application/json" \
-  -d '{"topic_name":"Rust"}'
-```
-
-即可观察三层服务日志联动：
-- `httpserver`：接收请求、转发 gRPC、响应状态
-- `grpcserver`：话题校验、投票写入、结果读取
-- `redis`：连接与命令执行日志（镜像默认日志较少）
-
----
-
-## 11. 验收对照（对应作业要求）
-
-- [x] 1. Go 语言后端服务
-- [x] 2. 包含 httpserver 与 grpcserver 微服务
-- [x] 3. 两个服务均为 3 副本部署
-- [x] 4. 数据流转：Web -> HTTP -> gRPC -> Redis 完整
-- [x] 5. 使用 Redis `HINCRBY` 处理并发计数
-- [x] 6. Web 页面至少 3 话题且投票后刷新
-- [x] 7. 单元测试覆盖率 > 30%
-- [x] 8. 提供架构与实现文档
+- 1. Go 语言后端服务
+- 2. 包含 httpserver 与 grpcserver 微服务
+- 3. 两个服务均为 3 副本部署
+- 4. 数据流转：Web -> HTTP -> gRPC -> Redis 完整
+- 5. 使用 Redis `HINCRBY` 处理并发计数
+- 6. Web 页面至少 3 话题且投票后刷新
+- 7. 单元测试覆盖率 > 30%
+- 8. 提供架构与实现文档
 
 ---
